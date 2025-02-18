@@ -1,0 +1,130 @@
+---
+- name: Automatizar configuração do ambiente MQTT
+  hosts: localhost
+  become: true
+  tasks:
+
+    # Instalar pacotes necessários
+    - name: Instalar o Mosquitto e cliente Mosquitto
+      apt:
+        name:
+          - mosquitto
+          - mosquitto-clients
+        state: present
+        update_cache: yes
+
+    # Garantir que o Mosquitto esteja ativo e rodando
+    - name: Iniciar e habilitar o Mosquitto
+      service:
+        name: mosquitto
+        state: started
+        enabled: yes
+
+    # Criar arquivo de senha para o Mosquitto
+    - name: Criar arquivo de senha para o Mosquitto
+      file:
+        path: /etc/mosquitto/passwd
+        state: touch
+        owner: mosquitto
+        group: mosquitto
+        mode: '0600'
+
+    - name: Adicionar usuário com senha no Mosquitto
+      command: mosquitto_passwd -b /etc/mosquitto/passwd user senha
+
+    - name: Configurar Mosquitto para exigir autenticação
+      lineinfile:
+        path: /etc/mosquitto/mosquitto.conf
+        regexp: '^#?allow_anonymous'
+        line: 'allow_anonymous false'
+      notify: Reiniciar Mosquitto
+
+    # Gerar chaves para criptografia
+    - name: Instalar net-tools para o script de geração de chaves
+      apt:
+        name: net-tools
+        state: present
+
+    - name: Baixar o script de geração de chaves
+      command: curl -L -o /tmp/generate-CA.sh https://raw.githubusercontent.com/owntracks/tools/master/TLS/generate-CA.sh
+
+    - name: Executar o script para gerar as chaves
+      command: bash /tmp/generate-CA.sh
+
+    - name: Criar diretório para os certificados
+      file:
+        path: /etc/mosquitto/certs/
+        state: directory
+        owner: mosquitto
+        group: mosquitto
+        mode: '0700'
+
+    - name: Encontrar certificados gerados
+      find:
+          paths: "/home/icaro/projects/ansible/"
+          patterns: '*.crt,*.key'
+      register: certs_encontrados
+
+    - name: Mover certificados para o diretório correto
+      command: mv "{{ item.path }}" "/etc/mosquitto/certs/"
+      loop: "{{ certs_encontrados.files }}"
+      when: certs_encontrados.matched > 0
+
+    - name: Ajustar permissões das chaves
+      file:
+        path: /etc/mosquitto/certs/{{ item }}
+        owner: mosquitto
+        group: mosquitto
+        mode: '0600'
+      loop:
+        - mosq-serv.crt
+        - mosq-ca.crt
+        - mosq-serv.key
+
+    - name: Configurar Mosquitto para usar TLS
+      blockinfile:
+        path: /etc/mosquitto/mosquitto.conf
+        block: |
+          listener 8883
+          cafile /etc/mosquitto/certs/mosq-ca.crt
+          certfile /etc/mosquitto/certs/mosq-serv.crt
+          keyfile /etc/mosquitto/certs/mosq-serv.key
+      notify: Reiniciar Mosquitto
+
+    # Testar comunicação MQTT com TLS
+    - name: Testar subscrição TLS
+      command: mosquitto_sub -t "/T1" -v --cafile /etc/mosquitto/certs/mosq-ca.crt -p 8883 -u ifpb -P ifpb
+      async: 30
+      poll: 0
+
+    - name: Publicar mensagem com TLS
+      command: mosquitto_pub -h 127.0.0.1 -t "/T1" --cafile /etc/mosquitto/certs/mosq-ca.crt -p 8883 -m "autenticado_criptografado" -u ifpb -P ifpb
+
+    # Instalar Python 2 e paho-mqtt
+    - name: Instalar Python 2
+      apt:
+        name: python2
+        state: present
+
+    - name: Instalar paho-mqtt para Python2
+      pip:
+        name: paho-mqtt
+        executable: pip2
+
+    # Executar os sensores virtuais
+    - name: Executar sensores virtuais Python
+      command: python2 /home/lpo/{{ item }}
+      async: 30
+      poll: 0
+      loop:
+        - sv_6000.py
+        - sv_5000.py
+        - atuador.py
+
+  handlers:
+    - name: Reiniciar Mosquitto
+      service:
+        name: mosquitto
+        state: restarted
+
+
